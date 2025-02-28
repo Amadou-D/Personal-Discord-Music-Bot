@@ -161,7 +161,7 @@ def run_bot():
             voice_clients[ctx.guild.id].stop()
             await voice_clients[ctx.guild.id].disconnect()
             del voice_clients[ctx.guild.id]
-        except Exception as e:
+        except Exception as e:                      
             print(e)
 
     @client.command(name="skip")
