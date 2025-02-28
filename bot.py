@@ -7,6 +7,8 @@ from dotenv import load_dotenv
 from flask import Flask
 from threading import Thread
 
+
+# Create a web server to keep the bot alive (Not necessary if you are hosting the bot on a server)
 app = Flask('')
 
 @app.route('/')
