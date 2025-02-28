@@ -77,7 +77,7 @@ def run_bot():
             return
 
         try:
-            # Handle YouTube share links
+            # Handle different types of youtube links
             if link.startswith("https://youtu.be/"):
                 video_id = link.split('/')[-1]
                 link = youtube_watch_url + video_id
