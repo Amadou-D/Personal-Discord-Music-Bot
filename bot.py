@@ -38,7 +38,7 @@ def run_bot():
     youtube_watch_url = youtube_base_url + 'watch?v='
 
     # Path to ffmpeg executable
-    ffmpeg_path = "C:\\ffmpeg\\bin\\ffmpeg.exe"  # Update this path to your ffmpeg executable
+    ffmpeg_path = "C:\\ffmpeg\\bin\\ffmpeg.exe"  # Update this path to your ffmpeg executable on your system 
 
     ffmpeg_options = {
         'executable': ffmpeg_path,
