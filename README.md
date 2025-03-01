@@ -46,4 +46,5 @@ node index.js
     Songs not playing? Check if YouTube cookies are required.
     Still having issues? Open an issue or check the logs for errors.
 
-Let me know if you need any edits! 🚀🎵
+Let me know if you need any edits! - Amadou
+
