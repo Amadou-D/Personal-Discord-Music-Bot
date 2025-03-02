@@ -1,6 +1,6 @@
 🎵 Discord Music Bot
 
-A powerful Discord music bot that plays YouTube videos, including playlists, using your own Discord bot token and YouTube cookies for better compatibility.
+A Discord music bot that plays YouTube videos, including playlists, using your own Discord bot token and YouTube cookies for better compatibility.
  Setup
 1. Get a Discord Bot Token
 
