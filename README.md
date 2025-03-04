@@ -29,12 +29,33 @@ DISCORD_TOKEN=your-bot-token-here
 YOUTUBE_COOKIES=your-cookie-string-here
 
 5. Run the Bot
+    Check Your Project Files:
+        Make sure you have the following:
+            main.py (your bot script).
+            .env file (with your bot token).
+            requirements.txt (optional, if you have a list of dependencies).
+        Your .env file should contain the line:
 
-Start the bot with:
+    DISCORD_TOKEN=your-bot-token-here
 
-node index.js
+Install Python Dependencies:
 
-🎶 Features
+    Open a terminal in your project directory.
+    Install all necessary libraries by running:
+
+pip install -r requirements.txt
+
+If you don't have a requirements.txt, you can install the core libraries directly:
+
+    pip install discord.py python-dotenv
+
+Run main.py:
+
+    Ensure your terminal/command prompt is in the directory where main.py is located.
+    Run the bot using the following command:
+
+python main.py
+
 
 ✅ Supports YouTube videos & playlists
 ✅ Plays high-quality audio in voice channels
