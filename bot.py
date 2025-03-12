@@ -1,12 +1,11 @@
 import discord
-from discord.ext import commands
+from discord.ext import commands, tasks
 import os
 import asyncio
 import yt_dlp
 from dotenv import load_dotenv
 from flask import Flask
 from threading import Thread
-
 
 # Create a web server to keep the bot alive (Not necessary if you are hosting the bot on a server)
 app = Flask('')
@@ -49,11 +48,16 @@ def run_bot():
     @client.event
     async def on_ready():
         print(f'{client.user} is now jamming')
+        check_voice_activity.start()
 
     async def play_next(ctx):
         if queues[ctx.guild.id]:
             link = queues[ctx.guild.id].pop(0)
             await play(ctx, link=link)
+        else:
+            await voice_clients[ctx.guild.id].disconnect()
+            del voice_clients[ctx.guild.id]
+            print(f"Disconnected from {ctx.guild.name} because the queue is empty.")
 
     @client.command(name="play")
     async def play(ctx, *, link):
@@ -177,6 +181,20 @@ def run_bot():
         except Exception as e:
             print(f"Error skipping the song: {e}")
             await ctx.send('There was an error skipping the song.')
+
+    @tasks.loop(seconds=60)
+    async def check_voice_activity():
+        print("Checking voice activity...")
+        for guild_id, voice_client in voice_clients.items():
+            print(f"Checking guild {guild_id}...")
+            if not voice_client.is_playing() and len(voice_client.channel.members) == 1:
+                print(f"Disconnecting from {voice_client.channel} due to inactivity.")
+                await voice_client.disconnect()
+                del voice_clients[guild_id]
+            elif len(voice_client.channel.members) == 0:
+                print(f"Disconnecting from {voice_client.channel} because no users are in the call.")
+                await voice_client.disconnect()
+                del voice_clients[guild_id]
 
     client.run(TOKEN)
 
