@@ -92,7 +92,7 @@ def run_bot():
                 ytdl = yt_dlp.YoutubeDL({
                     "format": "bestaudio/best",
                     "playlist_items": "1",
-                    "cookiesfrombrowser": ("firefox",)  # Use cookies from Firefox browser
+                    "extractor_args": {"youtube": {"player_client": ["web_safari"]}}  # Specify Safari client
                 })
                 search_results = ytdl.extract_info(f"ytsearch:{link}", download=False)['entries']
                 if not search_results:
@@ -107,7 +107,7 @@ def run_bot():
             ytdl = yt_dlp.YoutubeDL({
                 "format": "bestaudio/best",
                 "playlist_items": "1",
-                "cookiesfrombrowser": ("firefox",)  # Use cookies from Firefox browser
+                "extractor_args": {"youtube": {"player_client": ["web_safari"]}}  # Specify Safari client
             })
             data = await loop.run_in_executor(None, lambda: ytdl.extract_info(link, download=False))
 
