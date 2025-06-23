@@ -14,6 +14,14 @@ from dotenv import load_dotenv
 from flask import Flask
 from threading import Thread
 
+# Add this: Check for PyNaCl, which is required for voice.
+try:
+    import nacl
+except ImportError:
+    print("PyNaCl is not installed, which is required for voice functionality.")
+    print("Please install it with: pip install PyNaCl")
+    sys.exit()
+
 # Add this: Try to import pytube for alternative extraction
 try:
     import pytube
@@ -63,10 +71,10 @@ def run_bot():
 
     intents = discord.Intents.default()
     intents.message_content = True
+    intents.voice_states = True  # REQUIRED for voice state tracking
     client = commands.Bot(command_prefix=".", intents=intents)
 
     queues = {}
-    voice_clients = {}
     currently_playing = {}  # Track currently playing songs
     youtube_base_url = 'https://www.youtube.com/'
     youtube_watch_url = youtube_base_url + 'watch?v='
@@ -98,6 +106,20 @@ def run_bot():
     async def on_ready():
         print(f'{client.user} is now jamming')
         check_voice_activity.start()
+
+    @client.event
+    async def on_voice_state_update(member, before, after):
+        """Handles voice state changes to clean up resources."""
+        # Check if the bot is the one who's voice state changed
+        if member.id == client.user.id:
+            # If the bot was disconnected from a channel
+            if before.channel is not None and after.channel is None:
+                guild_id = before.channel.guild.id
+                print(f"Bot was disconnected from voice channel in guild {guild_id}.")
+                # Clean up the queue for that guild
+                if guild_id in queues:
+                    queues[guild_id].clear()
+                    print(f"Cleared queue for guild {guild_id}.")
 
     # Audio extraction utility using different strategies
     class AudioExtractor:
@@ -416,10 +438,59 @@ def run_bot():
                 print(f"Direct download failed: {e}")
                 raise
 
+    async def resolve_link(ctx, link):
+        """Resolves a link or search query into a playable URL and title."""
+        # Handle short youtube links
+        if link.startswith("https://youtu.be/"):
+            video_id = link.split('/')[-1]
+            link = youtube_watch_url + video_id
+
+        # If it's not a full YouTube URL, treat it as a search query
+        if youtube_base_url not in link:
+            await ctx.send(f"🔍 Searching for: `{link}`")
+            
+            ytdl = yt_dlp.YoutubeDL({
+                "format": "bestaudio/best",
+                "default_search": "ytsearch",
+                "noplaylist": True,
+                "quiet": True,
+                "extract_flat": True
+            })
+            
+            try:
+                data = await asyncio.get_event_loop().run_in_executor(
+                    None,
+                    lambda: ytdl.extract_info(f"ytsearch:{link}", download=False)
+                )
+                
+                if not data or 'entries' not in data or not data['entries']:
+                    await ctx.send("❌ No results found for your search.")
+                    return None, None
+                
+                video_id = data['entries'][0]['id']
+                title = data['entries'][0].get('title', 'Unknown')
+                url = youtube_watch_url + video_id
+                await ctx.send(f"✅ Found: {title}")
+                return url, title
+            except Exception as e:
+                print(f"Search error: {e}")
+                await ctx.send(f"❌ Error during search: {str(e)[:100]}...")
+                return None, None
+        
+        # If it's already a URL, return it. Title will be fetched during audio extraction.
+        return link, None
+
     # Safe audio player function with multiple fallback strategies
     async def play_audio(ctx, url, title=None):
         guild_id = ctx.guild.id
-        voice_client = voice_clients[guild_id]
+        voice_client = discord.utils.get(client.voice_clients, guild=ctx.guild)
+
+        # Final check to ensure we are still connected before playing
+        if not voice_client or not voice_client.is_connected():
+            await ctx.send("❌ Lost voice connection before playback. Please try again.")
+            if guild_id in queues:
+                queues[guild_id].clear()
+            return
         
         # Set up playback error counter
         if guild_id not in currently_playing:
@@ -520,24 +591,28 @@ def run_bot():
 
     async def play_next(ctx):
         """Play the next song in the queue if exists"""
+        voice_client = discord.utils.get(client.voice_clients, guild=ctx.guild)
+        if not voice_client or not voice_client.is_connected() or voice_client.is_playing() or voice_client.is_paused():
+            return
+
         try:
             if ctx.guild.id in queues and queues[ctx.guild.id]:
-                # Reset retry counter for new song
                 if ctx.guild.id in currently_playing:
-                    currently_playing[ctx.guild.id]["retries"] = 0  # Fixed: using ctx.guild.id instead of guild_id
+                    currently_playing[ctx.guild.id]["retries"] = 0
                 
-                link = queues[ctx.guild.id].pop(0)
-                await play(ctx, link=link)
+                next_link = queues[ctx.guild.id].pop(0)
+                
+                # Resolve link (in case it's a search query)
+                url, title = await resolve_link(ctx, next_link)
+                if url:
+                    await play_audio(ctx, url, title=title)
             else:
                 # Queue is empty, stay connected but reset play state
                 if ctx.guild.id in currently_playing:
-                    currently_playing[ctx.guild.id]["retries"] = 0  # Fixed: using ctx.guild.id instead of guild_id
+                    currently_playing[ctx.guild.id]["retries"] = 0
                 
-                if ctx.guild.id in voice_clients and voice_clients[ctx.guild.id].is_connected():
-                    # Only send message if we're still in a channel
+                if voice_client and voice_client.is_connected():
                     await ctx.send("Queue is empty. Add more songs with `.play [link/search]`")
-                    
-                    # Start a 5-minute inactivity timer
                     await ctx.send("Bot will automatically disconnect after 5 minutes of inactivity.")
         except Exception as e:
             print(f"Error in play_next: {e}")
@@ -545,84 +620,69 @@ def run_bot():
     @client.command(name="play")
     async def play(ctx, *, link):
         try:
-            # Connect to voice if not already connected
-            if ctx.guild.id not in voice_clients or not voice_clients[ctx.guild.id].is_connected():
-                # Check if user is in a voice channel
-                if ctx.author.voice is None:
-                    await ctx.send("❌ You need to be in a voice channel to use this command.")
+            # Ensure user is in a voice channel
+            if not ctx.author.voice or not ctx.author.voice.channel:
+                await ctx.send("❌ You need to be in a voice channel to use this command.")
+                return
+
+            voice_channel = ctx.author.voice.channel
+            voice_client = discord.utils.get(client.voice_clients, guild=ctx.guild)
+
+            # Handle connecting and moving channels
+            if voice_client and voice_client.is_connected():
+                if voice_client.channel != voice_channel:
+                    await voice_client.move_to(voice_channel)
+                    await ctx.send(f"➡️ Moved to {voice_channel.name}")
+            else:
+                # Check permissions before connecting
+                perms = voice_channel.permissions_for(ctx.guild.me)
+                if not perms.connect:
+                    await ctx.send(f"❌ I don't have permission to **connect** to `{voice_channel.name}`. Please check my role permissions.")
                     return
-                    
-                # Connect to the voice channel
+                if not perms.speak:
+                    await ctx.send(f"❌ I don't have permission to **speak** in `{voice_channel.name}`. Please check my role permissions.")
+                    return
+
                 try:
-                    voice_client = await ctx.author.voice.channel.connect()
-                    voice_clients[ctx.guild.id] = voice_client
-                    await ctx.send(f"👋 Joined {ctx.author.voice.channel.name}")
-                except Exception as e:
-                    print(f"Error connecting to voice channel: {e}")
-                    await ctx.send("❌ Error connecting to voice channel.")
+                    voice_client = await voice_channel.connect(timeout=20.0, reconnect=True)
+                    await ctx.send(f"👋 Joined {voice_channel.name}")
+                except asyncio.TimeoutError:
+                    await ctx.send("❌ Connection to the voice channel timed out. This might be a Discord issue. Try changing your server's voice region in Server Settings > Overview.")
                     return
-            
+                except discord.errors.ClientException as e:
+                    await ctx.send(f"❌ A client-side error occurred: {e}")
+                    return
+                except Exception as e:
+                    await ctx.send(f"❌ Failed to join voice channel: {e}")
+                    return
+
+            # Wait for connection to stabilize and double-check
+            await asyncio.sleep(1.0)
+            if not voice_client or not voice_client.is_connected():
+                await ctx.send("❌ Voice connection failed. Please try again.")
+                return
+
             # Initialize queue if needed
             if ctx.guild.id not in queues:
                 queues[ctx.guild.id] = []
 
-            # Add to queue if already playing
-            if voice_clients[ctx.guild.id].is_playing():
+            # Add to queue if already playing or paused
+            if voice_client.is_playing() or voice_client.is_paused():
                 queues[ctx.guild.id].append(link)
-                await ctx.send(f"➕ Added to queue at position {len(queues[ctx.guild.id])}")
+                await ctx.send(f"➕ Added to queue: `{link}`")
                 return
 
-            # Handle different types of youtube links
-            if link.startswith("https://youtu.be/"):
-                video_id = link.split('/')[-1]
-                link = youtube_watch_url + video_id
+            # Resolve the link or search query
+            url, title = await resolve_link(ctx, link)
+            if not url:
+                return  # Error message was already sent
 
-            # Check if the link is a YouTube URL or a search query
-            if youtube_base_url not in link:
-                await ctx.send(f"🔍 Searching for: {link}")
-                
-                # Use yt_dlp to search for the song
-                ytdl = yt_dlp.YoutubeDL({
-                    "format": "bestaudio/best",
-                    "playlist_items": "1",
-                    "default_search": "ytsearch",
-                    "noplaylist": True,
-                    "quiet": True,
-                    "extract_flat": True
-                })
-                
-                try:
-                    data = await asyncio.get_event_loop().run_in_executor(
-                        None,
-                        lambda: ytdl.extract_info(f"ytsearch:{link}", download=False)
-                    )
-                    
-                    if not data or 'entries' not in data or not data['entries']:
-                        await ctx.send("❌ No results found for your search.")
-                        return
-                    
-                    video_id = data['entries'][0]['id']
-                    title = data['entries'][0].get('title', 'Unknown')
-                    link = youtube_watch_url + video_id
-                    await ctx.send(f"✅ Found: {title}")
-                except Exception as e:
-                    print(f"Search error: {e}")
-                    await ctx.send(f"❌ Error during search: {str(e)[:100]}...")
-                    return
-
-            # Now play the audio with smart handling
-            await play_audio(ctx, link)
+            # Now play the audio
+            await play_audio(ctx, url, title=title)
             
-        except discord.errors.ClientException as e:
-            print(f"Discord client error: {e}")
-            if "Already playing audio" in str(e):
-                queues[ctx.guild.id].append(link)
-                await ctx.send("➕ Added to queue!")
-            else:
-                await ctx.send(f'❌ Discord error: {str(e)[:100]}...')
         except Exception as e:
             print(f"Error in play command: {e}")
-            await ctx.send(f'❌ Error: {str(e)[:100]}...')
+            await ctx.send(f'❌ An unexpected error occurred: {str(e)[:100]}...')
 
     @client.command(name="clear_queue")
     async def clear_queue(ctx):
@@ -656,9 +716,10 @@ def run_bot():
 
     @client.command(name="pause")
     async def pause(ctx):
+        voice_client = discord.utils.get(client.voice_clients, guild=ctx.guild)
         try:
-            if ctx.guild.id in voice_clients and voice_clients[ctx.guild.id].is_playing():
-                voice_clients[ctx.guild.id].pause()
+            if voice_client and voice_client.is_playing():
+                voice_client.pause()
                 await ctx.send("⏸️ Paused playback.")
             else:
                 await ctx.send("ℹ️ Nothing is playing right now.")
@@ -668,9 +729,10 @@ def run_bot():
 
     @client.command(name="resume")
     async def resume(ctx):
+        voice_client = discord.utils.get(client.voice_clients, guild=ctx.guild)
         try:
-            if ctx.guild.id in voice_clients and voice_clients[ctx.guild.id].is_paused():
-                voice_clients[ctx.guild.id].resume()
+            if voice_client and voice_client.is_paused():
+                voice_client.resume()
                 await ctx.send("▶️ Resumed playback.")
             else:
                 await ctx.send("ℹ️ Nothing is paused right now.")
@@ -680,35 +742,27 @@ def run_bot():
 
     @client.command(name="stop")
     async def stop(ctx):
+        voice_client = discord.utils.get(client.voice_clients, guild=ctx.guild)
         try:
-            if ctx.guild.id in voice_clients:
-                if voice_clients[ctx.guild.id].is_playing() or voice_clients[ctx.guild.id].is_paused():
-                    voice_clients[ctx.guild.id].stop()
-                    await ctx.send("⏹️ Stopped playback.")
-                else:
-                    await ctx.send("ℹ️ Nothing is playing right now.")
+            if voice_client and (voice_client.is_playing() or voice_client.is_paused()):
+                if ctx.guild.id in queues:
+                    queues[ctx.guild.id].clear()
+                voice_client.stop()
+                await ctx.send("⏹️ Stopped playback and cleared the queue.")
             else:
-                await ctx.send("ℹ️ I'm not connected to a voice channel.")
+                await ctx.send("ℹ️ Nothing is playing right now.")
         except Exception as e:
             print(f"Error in stop: {e}")
             await ctx.send("❌ Error stopping playback.")
 
     @client.command(name="leave")
     async def leave(ctx):
+        voice_client = discord.utils.get(client.voice_clients, guild=ctx.guild)
         try:
-            if ctx.guild.id in voice_clients and voice_clients[ctx.guild.id].is_connected():
-                # Stop any current playback
-                if voice_clients[ctx.guild.id].is_playing() or voice_clients[ctx.guild.id].is_paused():
-                    voice_clients[ctx.guild.id].stop()
-                
-                # Disconnect and clean up
-                await voice_clients[ctx.guild.id].disconnect()
-                del voice_clients[ctx.guild.id]
-                
-                # Clear the queue
+            if voice_client and voice_client.is_connected():
                 if ctx.guild.id in queues:
                     queues[ctx.guild.id].clear()
-                    
+                await voice_client.disconnect()
                 await ctx.send("👋 Disconnected from voice channel.")
             else:
                 await ctx.send("ℹ️ I'm not connected to a voice channel.")
@@ -718,35 +772,57 @@ def run_bot():
 
     @client.command(name="skip")
     async def skip(ctx):
+        voice_client = discord.utils.get(client.voice_clients, guild=ctx.guild)
         try:
-            if ctx.guild.id in voice_clients and voice_clients[ctx.guild.id].is_playing():
-                voice_clients[ctx.guild.id].stop()
+            if voice_client and voice_client.is_playing():
+                voice_client.stop()
                 await ctx.send("⏭️ Skipped the current song.")
-                # play_next will be called by the after callback
+                # The 'after' callback from the original play call will trigger play_next
             else:
                 await ctx.send("ℹ️ Nothing is playing right now.")
         except Exception as e:
             print(f"Error skipping the song: {e}")
             await ctx.send('❌ Error skipping the song.')
 
+    @client.command(name="checkperms")
+    async def check_perms(ctx):
+        """Checks the bot's permissions in your current voice channel."""
+        if not ctx.author.voice or not ctx.author.voice.channel:
+            await ctx.send("You need to be in a voice channel to use this command.")
+            return
+
+        channel = ctx.author.voice.channel
+        perms = channel.permissions_for(ctx.guild.me)
+
+        permissions_list = [
+            f"Connect: {'✅' if perms.connect else '❌'}",
+            f"Speak: {'✅' if perms.speak else '❌'}",
+            f"Use Voice Activity: {'✅' if perms.use_voice_activity else '❌'}",
+            f"Priority Speaker: {'✅' if perms.priority_speaker else '❌'}"
+        ]
+        
+        embed = discord.Embed(
+            title=f"Permissions in #{channel.name}",
+            description="\n".join(permissions_list),
+            color=discord.Color.blue() if perms.connect and perms.speak else discord.Color.red()
+        )
+        await ctx.send(embed=embed)
+
     @tasks.loop(seconds=300)  # Check every 5 minutes
     async def check_voice_activity():
         """Check for inactive voice connections and disconnect if inactive for too long"""
         try:
-            voice_clients_copy = dict(voice_clients)
-            for guild_id, voice_client in voice_clients_copy.items():
-                # Skip if not connected
-                if not voice_client.is_connected():
+            for vc in client.voice_clients:
+                # If the bot is playing, it's not inactive
+                if vc.is_playing():
                     continue
-                    
-                # Check if bot is alone or if no one is playing and no one has spoken for a while
-                if voice_client.channel and not voice_client.is_playing():
-                    # Check if bot is alone in channel
-                    members = voice_client.channel.members
-                    if len(members) == 1 and members[0].id == client.user.id:
-                        print(f"Bot is alone in {voice_client.channel}. Disconnecting.")
-                        await voice_client.disconnect()
-                        del voice_clients[guild_id]
+                
+                # If the bot is alone in the channel, disconnect
+                if len(vc.channel.members) == 1:
+                    print(f"Bot is alone in {vc.channel}. Disconnecting.")
+                    if vc.guild.id in queues:
+                        queues[vc.guild.id].clear()
+                    await vc.disconnect()
         except Exception as e:
             print(f"Error in check_voice_activity: {e}")
 
