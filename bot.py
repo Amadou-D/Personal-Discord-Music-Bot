@@ -98,7 +98,7 @@ def run_bot():
         # Strategy 1: Enhanced reconnection options for streaming
         'streaming': {
             'executable': ffmpeg_path,
-            'before_options': '-reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 10 -timeout 15000000',
+            'before_options': '-reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5',
             'options': '-vn -filter:a "volume=0.25"'
         },
         # Strategy 2: Basic streaming with minimal options
@@ -192,16 +192,19 @@ def run_bot():
             ydl_opts = {
                 'format': 'bestaudio/best',
                 'outtmpl': f'{output_file_base}.%(ext)s',
-                'postprocessors': [{
-                    'key': 'FFmpegExtractAudio',
-                    'preferredcodec': 'mp3',
-                    'preferredquality': '128',
-                }],
                 'quiet': False,
                 'no_warnings': False,
                 'extractor_args': {"youtube": {"player_client": ["web_safari"]}},
                 'noplaylist': True,
+                'postprocessors': [{
+                    'key': 'FFmpegExtractAudio',
+                    'preferredcodec': 'mp3',
+                    'preferredquality': '192',
+                }],
                 'hls_prefer_ffmpeg': True,  # Use ffmpeg for HLS streams, more robust
+                # --- Additions to handle fragment errors ---
+                'fragment_retries': 50,      # Retry fragments 50 times
+                'retry_sleep': {'fragment': 1.5}, # Sleep 1.5s between fragment retries
             }
 
             # Add cookie support if the file exists. This can significantly improve reliability.
@@ -218,18 +221,21 @@ def run_bot():
                     info = ydl.extract_info(url, download=True)
                     if 'entries' in info:
                         info = info['entries'][0]
-                    return info.get('title', 'Unknown')
+                    # Get the actual path of the downloaded file from yt-dlp's info dict
+                    # After post-processing, the extension will be mp3.
+                    downloaded_file = f"{output_file_base}.mp3"
+                    return info.get('title', 'Unknown'), downloaded_file
 
-            title = await asyncio.get_event_loop().run_in_executor(None, download_audio)
-            
-            # The final file will always be .mp3 because of the postprocessor.
-            output_file = output_file_base + ".mp3"
+            title, output_file = await asyncio.get_event_loop().run_in_executor(None, download_audio)
 
             if os.path.exists(output_file) and os.path.getsize(output_file) > 1000:
                 print(f"Successfully downloaded file: {output_file} ({os.path.getsize(output_file)} bytes)")
                 await ctx.send(f"✅ **Download complete!**")
                 return output_file, title
             else:
+                # Clean up potentially failed/empty file
+                if os.path.exists(output_file):
+                    os.unlink(output_file)
                 raise FileNotFoundError(f"Downloaded file not found or was empty for {url}")
 
     async def resolve_link(ctx, link):
