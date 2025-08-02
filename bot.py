@@ -54,6 +54,10 @@ def run_bot():
     if not TOKEN:
         raise ValueError("No token provided. Please set the 'TOKEN' environment variable.")
 
+    # Path to the cookies file. You may need to create this file yourself.
+    # See the comment in the download_and_get_path function for instructions.
+    cookies_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "cookies.txt")
+
     # Create temp directory for downloads
     temp_dir = os.path.join(tempfile.gettempdir(), "discord_bot_audio")
     os.makedirs(temp_dir, exist_ok=True)
@@ -157,322 +161,76 @@ def run_bot():
 
     # Audio extraction utility using different strategies
     class AudioExtractor:
-        # Itags known to work well with Discord ffmpeg
-        AUDIO_ITAGS = [140, 141, 251, 250, 249, 139, 171, 18, 22]
-        
-        @staticmethod
-        async def extract_with_pytube(url, ctx):
-            """Extract audio using pytube and specific itags"""
-            if not PYTUBE_AVAILABLE:
-                await ctx.send("⚠️ pytube not available, using fallback method...")
-                raise ImportError("pytube not installed")
-                
-            try:
-                await ctx.send("🔍 Extracting audio stream with pytube...")
-                
-                # Extract video ID from the URL if it's a YouTube URL
-                video_id = None
-                if "youtube.com" in url:
-                    video_id = url.split("v=")[-1].split("&")[0]
-                elif "youtu.be" in url:
-                    video_id = url.split("/")[-1].split("?")[0]
-                
-                if not video_id:
-                    raise ValueError("Could not extract YouTube video ID")
-                
-                # Create YouTube object with modified approach to prevent 400 errors
-                yt = None
-                try:
-                    # First try with default method
-                    yt = pytube.YouTube(url)
-                    title = yt.title
-                except Exception as e:
-                    print(f"Initial pytube error: {e}")
-                    # Try with alternative method that adds headers and bypasses age restriction
-                    try:
-                        yt = pytube.YouTube(
-                            url,
-                            use_oauth=False,
-                            allow_oauth_cache=True
-                        )
-                        title = yt.title
-                    except Exception as e2:
-                        print(f"Alternative pytube initialization failed: {e2}")
-                        raise e2
-                
-                # Method 1: Use general stream selection to find audio
-                try:
-                    print("Trying general stream selection...")
-                    
-                    # First try to get audio-only streams sorted by quality
-                    audio_streams = yt.streams.filter(only_audio=True).order_by('abr').desc()
-                    if audio_streams:
-                        chosen_stream = audio_streams.first()
-                        if chosen_stream:
-                            print(f"Found audio stream: {chosen_stream}")
-                            audio_url = chosen_stream.url
-                            return audio_url, title
-                            
-
-                    # If no audio streams, try getting any stream that we can extract audio from
-                    all_streams = yt.streams.filter().order_by('resolution').desc()
-                    if all_streams:
-                        chosen_stream = all_streams.first()
-                        if chosen_stream:
-                            print(f"Found general stream: {chosen_stream}")
-                            audio_url = chosen_stream.url
-                            return audio_url, title
-                            
-
-                except Exception as e:
-                    print(f"General stream selection failed: {e}")
-                
-                # Method 2: DASH streams (more reliable but may still get blocked)
-                try:
-                    print("Trying DASH streams...")
-                    # Enable adaptive streams access that includes audio-only formats
-                    streams = yt.streams.filter(adaptive=True).order_by('abr').desc()
-                    for stream in streams:
-                        if stream.includes_audio_track:
-                            print(f"Using adaptive stream: {stream}")
-                            return stream.url, title
-                except Exception as e:
-                    print(f"DASH stream approach failed: {e}")
-                
-                # Method 3: Try to use the native get_by_itag but without HTTP request
-                print("Trying manual itag extraction...")
-                for itag in AudioExtractor.AUDIO_ITAGS:
-                    try:
-                        stream = yt.streams.get_by_itag(itag)
-                        if stream:
-                            print(f"Found stream with itag {itag}")
-                            return stream.url, title
-                    except Exception as e:
-                        print(f"Failed to get itag {itag}: {e}")
-                
-                raise Exception("No suitable audio stream found with pytube")
-                    
-            except Exception as e:
-                print(f"pytube extraction failed: {e}")
-                raise
         
         @staticmethod
         async def get_audio_url(url, ctx):
-            """Extract audio URL using multiple strategies"""
-            # Try direct download first - most reliable method
+            """
+            The single, most reliable method for getting audio.
+            It will always download the audio to a local file and return the path.
+            """
             try:
-                return await AudioExtractor.download_directly(url, ctx)
+                return await AudioExtractor.download_and_get_path(url, ctx, cookies_path)
             except Exception as e:
-                print(f"Direct download failed: {e}")
-                await ctx.send("Direct download failed, trying streaming methods...")
-            
-            # Continue with other strategies...
-            try:
-                # Strategy 1: Default extraction with specific format to avoid HLS streams
-                ytdl = yt_dlp.YoutubeDL({
-                    "format": "bestaudio[ext!=m3u8]/bestaudio/best",  # Avoid m3u8 (HLS) formats
-                    "playlist_items": "1",
-                    "extractor_args": {"youtube": {"player_client": ["web_safari"]}}
-                })
-                data = await asyncio.get_event_loop().run_in_executor(
-                    None, lambda: ytdl.extract_info(url, download=False)
-                )
-                
-                if 'entries' in data:
-                    return data['entries'][0]['url'], data['entries'][0].get('title', 'Unknown')
-                else:
-                    return data['url'], data.get('title', 'Unknown')
-                    
-            except Exception as e:
-                print(f"Strategy 1 failed: {e}")
-                try:
-                    # Strategy 2: Try with explicit format ids
-                    ytdl = yt_dlp.YoutubeDL({
-                        "format": "140/251/250/249/bestaudio/18/22",  # Direct format IDs to avoid HLS
-                        "playlist_items": "1",
-                        "extractor_args": {"youtube": {"player_client": ["web_safari", "web", "android"]}}
-                    })
-                    data = await asyncio.get_event_loop().run_in_executor(
-                        None, lambda: ytdl.extract_info(url, download=False)
-                    )
-                    
-                    if 'entries' in data:
-                        return data['entries'][0]['url'], data['entries'][0].get('title', 'Unknown')
-                    else:
-                        return data['url'], data.get('title', 'Unknown')
-                        
-                except Exception as e2:
-                    print(f"Strategy 2 failed: {e2}")
-                    await ctx.send("Having trouble extracting audio. Trying alternative method...")
-                    
-                    # Strategy 3: Fall back to downloading the audio
-                    return await AudioExtractor.download_and_get_path(url, ctx)
-        
-        @staticmethod
-        async def download_and_get_path(url, ctx):
-            """Download audio to local file and return path"""
-            try:
-                # Generate unique filename
-                unique_id = str(uuid.uuid4())
-                output_file_base = os.path.join(temp_dir, unique_id)
-                
-                await ctx.send("⏳ Downloading audio file for more reliable playback...")
-                
-                # First try direct format download without postprocessing
-                ydl_opts = {
-                    'format': '140/18/251/bestaudio',  # Specific format IDs to avoid HLS
-                    'outtmpl': output_file_base + ".mp3",  # Force .mp3 extension
-                    'keepvideo': False,
-                    'quiet': False,
-                    'no_warnings': False,
-                    'extractor_args': {"youtube": {"player_client": ["web_safari"]}}
-                }
-                
-                # Download the file
-                def download_audio():
-                    with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-                        info = ydl.extract_info(url, download=True)
-                        if 'entries' in info:
-                            info = info['entries'][0]
-                        return info.get('title', 'Unknown')
-                
-                try:
-                    title = await asyncio.get_event_loop().run_in_executor(None, download_audio)
-                    output_file = output_file_base + ".mp3"
-                    
-                    if not os.path.exists(output_file) or os.path.getsize(output_file) < 1000:
-                        raise Exception("First download attempt failed, trying ffmpeg conversion")
-                except Exception as e:
-                    print(f"First download method failed: {e}")
-                    # Second attempt with ffmpeg conversion
-                    ydl_opts = {
-                        'format': 'bestaudio/best',
-                        'outtmpl': output_file_base,
-                        'postprocessors': [{
-                            'key': 'FFmpegExtractAudio',
-                            'preferredcodec': 'mp3',
-                            'preferredquality': '192',
-                        }],
-                        'quiet': False,
-                        'extractor_args': {"youtube": {"player_client": ["web_safari"]}}
-                    }
-                    
-                    title = await asyncio.get_event_loop().run_in_executor(None, download_audio)
-                    output_file = output_file_base + ".mp3"
-                
-                # Check for various possible file paths
-                file_paths = [
-                    output_file,
-                    output_file_base + ".mp3.mp3",  # Handle double extension
-                    output_file_base + ".m4a",
-                    output_file_base + ".webm",
-                    output_file_base + ".opus"
-                ]
-                
-                found_file = None
-                for file_path in file_paths:
-                    if os.path.exists(file_path) and os.path.getsize(file_path) > 1000:  # At least 1KB
-                        found_file = file_path
-                        break
-                        
-                # If no file found, try glob pattern
-                if not found_file:
-                    import glob
-                    files = glob.glob(f"{output_file_base}*")
-                    for file in files:
-                        if os.path.getsize(file) > 1000:  # At least 1KB
-                            found_file = file
-                            break
-                        
-                if found_file:
-                    print(f"Successfully downloaded file: {found_file} ({os.path.getsize(found_file)} bytes)")
-                    await ctx.send(f"✅ Download complete! ({os.path.getsize(found_file)/1024:.1f} KB)")
-                    return found_file, title
-                else:
-                    raise FileNotFoundError(f"Downloaded file not found or too small for {url}")
-                    
-            except Exception as e:
-                print(f"Download failed: {e}")
-                await ctx.send(f"⚠️ Download failed: {str(e)[:100]}...")
+                print(f"Fatal download error: {e}")
+                await ctx.send(f"❌ I couldn't get the song. YouTube might be blocking me. The error was: `{str(e)[:150]}`")
                 raise
 
         @staticmethod
-        async def download_directly(url, ctx):
-            """Use direct command line approach to download audio"""
-            try:
-                await ctx.send("🔄 Using direct download method...")
-                
-                # Generate unique filename
-                unique_id = str(uuid.uuid4())
-                output_file_base = os.path.join(temp_dir, unique_id)
-                output_file = f"{output_file_base}.mp3"
-                
-                # Prepare youtube-dl/yt-dlp command with very basic options
-                # This approach often works when the library methods fail
-                cmd = [
-                    'yt-dlp',  # Try to use yt-dlp command line tool
-                    '--no-playlist',
-                    '--extract-audio',
-                    '--audio-format', 'mp3',
-                    '--audio-quality', '128K',
-                    '-o', output_file,
-                    url
-                ]
-                
-                await ctx.send("📥 Downloading audio directly...")
-                
-                # Run the command
-                process = await asyncio.create_subprocess_exec(
-                    *cmd,
-                    stdout=subprocess.PIPE,
-                    stderr=subprocess.PIPE
-                )
-                
-                stdout, stderr = await process.communicate()
-                
-                if process.returncode != 0:
-                    # If yt-dlp fails, try youtube-dl as fallback
-                    await ctx.send("⚠️ First download tool failed, trying alternative...")
-                    cmd[0] = 'youtube-dl'  # Switch to youtube-dl
-                    
-                    process = await asyncio.create_subprocess_exec(
-                        *cmd,
-                        stdout=subprocess.PIPE,
-                        stderr=subprocess.PIPE
-                    )
-                    
-                    stdout, stderr = await process.communicate()
-                    
-                    if process.returncode != 0:
-                        raise Exception(f"Command line download failed: {stderr.decode()}")
-                
-                # Check if file exists and is not empty
-                if os.path.exists(output_file) and os.path.getsize(output_file) > 10000:
-                    # Get title from filename or URL
-                    if "youtube.com" in url or "youtu.be" in url:
-                        # Try to extract video ID and get title
-                        try:
-                            video_id = None
-                            if "youtube.com" in url:
-                                video_id = url.split("v=")[-1].split("&")[0]
-                            elif "youtu.be" in url:
-                                video_id = url.split("/")[-1].split("?")[0]
-                                
-                            # Use offline method to get title if possible
-                            title = f"YouTube Video ({video_id})"
-                        except:
-                            title = "YouTube Video"
-                    else:
-                        title = os.path.basename(url)
-                    
-                    await ctx.send(f"✅ Direct download successful ({os.path.getsize(output_file)/1024:.1f} KB)")
-                    return output_file, title
-                else:
-                    raise FileNotFoundError(f"Downloaded file not found or too small")
-                    
-            except Exception as e:
-                print(f"Direct download failed: {e}")
-                raise
+        async def download_and_get_path(url, ctx, cookies_file):
+            """
+            Downloads a song from a URL using yt-dlp and returns the local file path.
+            This is the most robust method against YouTube's anti-bot measures.
+            """
+            unique_id = str(uuid.uuid4())
+            output_file_base = os.path.join(temp_dir, unique_id)
+            
+            await ctx.send("⏳ **Downloading...** This is the most reliable method and may take a moment.")
+            
+            # This is the most robust configuration based on yt-dlp best practices.
+            # It lets yt-dlp choose the best audio, then uses ffmpeg to convert it to mp3.
+            # This avoids most issues with HLS fragments and format availability.
+            ydl_opts = {
+                'format': 'bestaudio/best',
+                'outtmpl': f'{output_file_base}.%(ext)s',
+                'postprocessors': [{
+                    'key': 'FFmpegExtractAudio',
+                    'preferredcodec': 'mp3',
+                    'preferredquality': '128',
+                }],
+                'quiet': False,
+                'no_warnings': False,
+                'extractor_args': {"youtube": {"player_client": ["web_safari"]}},
+                'noplaylist': True,
+                'hls_prefer_ffmpeg': True,  # Use ffmpeg for HLS streams, more robust
+            }
+
+            # Add cookie support if the file exists. This can significantly improve reliability.
+            # To get cookies.txt, use a browser extension like "Get cookies.txt"
+            # and export cookies from a logged-in YouTube session.
+            if os.path.exists(cookies_file):
+                print("Found cookies.txt, using it for download.")
+                ydl_opts['cookiefile'] = cookies_file
+            else:
+                print("cookies.txt not found. Downloads may be less reliable.")
+
+            def download_audio():
+                with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                    info = ydl.extract_info(url, download=True)
+                    if 'entries' in info:
+                        info = info['entries'][0]
+                    return info.get('title', 'Unknown')
+
+            title = await asyncio.get_event_loop().run_in_executor(None, download_audio)
+            
+            # The final file will always be .mp3 because of the postprocessor.
+            output_file = output_file_base + ".mp3"
+
+            if os.path.exists(output_file) and os.path.getsize(output_file) > 1000:
+                print(f"Successfully downloaded file: {output_file} ({os.path.getsize(output_file)} bytes)")
+                await ctx.send(f"✅ **Download complete!**")
+                return output_file, title
+            else:
+                raise FileNotFoundError(f"Downloaded file not found or was empty for {url}")
 
     async def resolve_link(ctx, link):
         """Resolves a link or search query into a playable URL and title."""
@@ -490,7 +248,8 @@ def run_bot():
                 "default_search": "ytsearch",
                 "noplaylist": True,
                 "quiet": True,
-                "extract_flat": True
+                "extract_flat": True,
+                "extractor_args": {"youtube": {"player_client": ["web_safari"]}}
             })
             
             try:
@@ -528,80 +287,39 @@ def run_bot():
                 queues[guild_id].clear()
             return
         
-        # Set up playback error counter
-        if guild_id not in currently_playing:
-            currently_playing[guild_id] = {"retries": 0}
-        
-        # First strategy - direct download and play
         try:
-            # Get audio file path or URL
-            audio_path_or_url, audio_title = await AudioExtractor.get_audio_url(url, ctx)
+            # Get audio file path. This will always be a local file now.
+            audio_path, audio_title = await AudioExtractor.get_audio_url(url, ctx)
             title = title or audio_title
             
-            # Check if we got a local file path
-            is_local_file = os.path.isfile(audio_path_or_url) if isinstance(audio_path_or_url, str) else False
+            print(f"Playing local file: {audio_path}")
             
-            # Custom error handler for better retry handling
-            def play_callback(error):
+            source = discord.FFmpegPCMAudio(
+                audio_path,
+                executable=ffmpeg_path,
+                options='-vn -filter:a "volume=0.25"'
+            )
+            
+            # Custom callback to clean up file after playing
+            def after_playing(error):
                 if error:
                     print(f"Playback error: {error}")
-                    asyncio.run_coroutine_threadsafe(
-                        handle_playback_error(ctx, url, title, error), 
-                        client.loop
-                    )
-                else:
-                    # Successful playback completion
-                    print(f"Playback completed successfully for {title}")
-                    asyncio.run_coroutine_threadsafe(play_next(ctx), client.loop)
+                
+                # Delete the temporary file
+                try:
+                    if os.path.exists(audio_path):
+                        os.unlink(audio_path)
+                        print(f"Deleted file: {audio_path}")
+                except Exception as e:
+                    print(f"Error deleting file: {e}")
+                
+                # Play next song
+                asyncio.run_coroutine_threadsafe(play_next(ctx), client.loop)
             
-            # For local files, use FFmpegPCMAudio directly
-            if is_local_file:
-                print(f"Playing local file: {audio_path_or_url}")
-                # Use basic local playback options
-                source = discord.FFmpegPCMAudio(
-                    audio_path_or_url,
-                    executable=ffmpeg_path,
-                    options='-vn -filter:a "volume=0.25"'
-                )
-                
-                # Custom callback to clean up file after playing
-                def after_local_playing(error):
-                    # Delete the temporary file
-                    try:
-                        if os.path.exists(audio_path_or_url):
-                            os.unlink(audio_path_or_url)
-                            print(f"Deleted file: {audio_path_or_url}")
-                    except Exception as e:
-                        print(f"Error deleting file: {e}")
-                    
-                    # Handle errors or play next song
-                    if error:
-                        print(f"Playback error: {error}")
-                        asyncio.run_coroutine_threadsafe(play_next(ctx), client.loop)
-                    else:
-                        asyncio.run_coroutine_threadsafe(play_next(ctx), client.loop)
-                
-                # Apply volume control and play
-                source = discord.PCMVolumeTransformer(source, volume=0.5)
-                voice_client.play(source, after=after_local_playing)
-                await ctx.send(f"▶️ Now playing: {title}")
-            else:
-                # For streaming URLs, consistently use FFmpegPCMAudio for stability
-                print(f"Playing streaming URL: {audio_path_or_url[:100]}...")
-                
-                before_options = '-reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5'
-                
-                source = discord.FFmpegPCMAudio(
-                    audio_path_or_url,
-                    executable=ffmpeg_path,
-                    before_options=before_options,
-                    options='-vn -filter:a "volume=0.25"'
-                )
-                
-                # Apply volume control
-                source = discord.PCMVolumeTransformer(source, volume=0.5)
-                voice_client.play(source, after=play_callback)
-                await ctx.send(f"▶️ Now playing: {title}")
+            # Apply volume control and play
+            source = discord.PCMVolumeTransformer(source, volume=0.5)
+            voice_client.play(source, after=after_playing)
+            await ctx.send(f"▶️ Now playing: **{title}**")
             
         except Exception as e:
             print(f"Error in play_audio: {e}")
@@ -1061,6 +779,8 @@ def run_bot():
         """Activates compatibility mode as an absolute last resort.
         Usage: .compatibilitymode [on/off]
         This mode avoids voice channel connection entirely."""
+
+
         guild_id = ctx.guild.id
         
         # Show current status if no mode provided
