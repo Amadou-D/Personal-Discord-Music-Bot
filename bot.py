@@ -88,7 +88,11 @@ def run_bot():
     youtube_watch_url = youtube_base_url + 'watch?v='
 
     # List of regions to try if the default one fails.
-    VOICE_REGIONS_FALLBACK = ['us-central', 'us-east', 'us-west', 'europe', 'brazil']
+    # Updated to prioritize South Korea and stable regions as requested
+    VOICE_REGIONS_FALLBACK = [
+        'south-korea', 'singapore', 'rotterdam', 'us-east', 
+        'us-central', 'us-west', 'brazil', 'hongkong', 'sydney'
+    ]
 
     # Path to ffmpeg executable
     ffmpeg_path = "C:\\ffmpeg\\bin\\ffmpeg.exe"  # Update this path to your ffmpeg executable
@@ -120,21 +124,51 @@ def run_bot():
     compatibility_mode = {}  # Guild IDs that use compatibility mode
 
     # Add these new utility functions before @client.event functions
-    async def safe_voice_connect(channel, timeout=10.0):
+    async def safe_voice_connect(channel, timeout=30.0):
         """
-        Connect to a voice channel with proper error handling and no automatic reconnects.
-        This prevents the discord.py library from getting stuck in reconnect loops.
+        Connect to a voice channel with proper error handling and internal retries.
         """
-        try:
-            # Create connection options with reconnect disabled
-            voice_client = await channel.connect(timeout=timeout, reconnect=False)
-            return voice_client, None
-        except asyncio.TimeoutError:
-            return None, "Connection timed out. Discord voice servers might be having issues."
-        except discord.ClientException as e:
-            return None, f"Discord client error: {e}"
-        except Exception as e:
-            return None, f"Error connecting: {e}"
+        last_error = None
+        # Try to connect multiple times before giving up on this specific attempt
+        # Increased retries to 3 to "keep trying" as requested
+        for attempt in range(3):
+            try:
+                # 1. Aggressive Cleanup
+                # Check guild's voice client
+                existing_voice = discord.utils.get(client.voice_clients, guild=channel.guild)
+                if existing_voice:
+                    try:
+                        await existing_voice.disconnect(force=True)
+                        await asyncio.sleep(1)  # Give Discord time to unregister the old client
+                    except Exception as e:
+                        print(f"Error during aggressive cleanup: {e}")
+
+                # 2. Wait for Discord to propagate the state change
+                # 4006 is often a race condition; waiting longer ensures the old session is dead.
+                await asyncio.sleep(3.0)
+
+                # 3. Connect
+                # reconnect=False prevents the library from looping on 4006 errors
+                voice_client = await channel.connect(timeout=timeout, reconnect=False, self_deaf=True)
+                return voice_client, None
+
+            except asyncio.TimeoutError:
+                last_error = "Connection timed out."
+                print(f"Connection attempt {attempt+1} timed out.")
+            except discord.ClientException as e:
+                last_error = f"Discord client error: {e}"
+                print(f"Connection attempt {attempt+1} error: {e}")
+            except discord.errors.ConnectionClosed as e:
+                last_error = f"Connection closed (Code {e.code})."
+                print(f"Connection attempt {attempt+1} failed with code {e.code}.")
+                # 4006 means session invalid. We need a longer wait for a fresh start.
+                await asyncio.sleep(5)
+            except Exception as e:
+                last_error = f"Error connecting: {e}"
+                print(f"Connection attempt {attempt+1} error: {e}")
+                await asyncio.sleep(2)
+                
+        return None, last_error
 
     @client.event
     async def on_ready():
@@ -507,14 +541,14 @@ def run_bot():
                     await ctx.send(f"⚠️ Initial connection failed: `{error}`. Attempting to switch voice regions...")
                     
                     if not voice_channel.permissions_for(ctx.guild.me).manage_channels:
-                        await ctx.send("❌ I can't automatically switch regions because I lack the **Manage Channels** permission.")
+                        await ctx.send(f"❌ I can't automatically switch regions because I lack the **Manage Channels** permission.\nError: {error}")
                     else:
                         original_region = voice_channel.rtc_region
                         for region_name in VOICE_REGIONS_FALLBACK:
                             await ctx.send(f"🔄 Trying region: `{region_name}`...")
                             try:
                                 await voice_channel.edit(rtc_region=region_name)
-                                await asyncio.sleep(1.5)
+                                await asyncio.sleep(3.0) # Increased wait time for region switch to propagate
 
                                 # Disconnect any lingering failed connections before retrying
                                 lingering_vc = discord.utils.get(client.voice_clients, guild=ctx.guild)
@@ -522,7 +556,7 @@ def run_bot():
                                     await lingering_vc.disconnect(force=True)
                                     await asyncio.sleep(1)
 
-                                voice_client, error = await safe_voice_connect(voice_channel, timeout=10.0)
+                                voice_client, error = await safe_voice_connect(voice_channel, timeout=15.0)
                                 if not error:
                                     await ctx.send(f"✅ Successfully connected in `{region_name}` region!")
                                     break  # Success!
